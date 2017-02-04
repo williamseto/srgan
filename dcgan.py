@@ -83,9 +83,6 @@ def create_generator(inputs, b_train=True):
         net = slim.conv2d_transpose(net, 3, [5, 5], scope='deconv6', activation_fn=tf.nn.tanh)
         print_shape(net)
 
-        # # generate downsampled outputs
-        # outputs = tf.image.resize_images(net, [image_h/4, image_w/4])
-        # print_shape(outputs)
         return net
 
 with tf.variable_scope("generator") as scope:
@@ -147,11 +144,15 @@ d_loss_fake = tf.reduce_mean( \
     tf.nn.sigmoid_cross_entropy_with_logits(disc_fake, \
                                             tf.zeros_like(disc_fake)))
 # similar to above, but we want fake (generator) images to output 1
-g_loss = tf.reduce_mean( \
+g_loss_adv = tf.reduce_mean( \
     tf.nn.sigmoid_cross_entropy_with_logits(disc_fake, \
                                             tf.ones_like(disc_fake)))
 
-# ToDo: add L2 loss for generator between input & output image
+# do L2 loss on generator for downsampled outputs
+outputs = tf.image.resize_images(gen_train, [image_h/4, image_w/4])
+g_loss_L2 = tf.nn.l2_loss(outputs - inputs)
+
+g_loss = 0.01*g_loss_L2 + g_loss_adv
 
 # d_loss_real_sum = tf.summary.scalar("d_loss_real", d_loss_real)
 # d_loss_fake_sum = tf.summary.scalar("d_loss_fake", d_loss_fake)
@@ -242,14 +243,17 @@ with tf.Session() as sess:
             if np.mod(counter, 500) == 1:
 
                 rand_idx = np.random.randint(len(data_test))
-                sample_image = np.array(imresize(imread(data_test[rand_idx]), 0.25)).astype(np.float32)
-
+                sample_image_orig = imread(data_test[rand_idx]).astype(np.float)
+                sample_image = np.array(imresize(sample_image_orig, 0.25)).astype(np.float32)
+                
                 sample = sess.run([gen_sample], feed_dict={sample_input: sample_image})
 
-                imsave('./samples/train_{:02d}_{:04d}.png'.format(epoch, idx), sample)
-
-                # save_images(samples, [8, 8],
-                #             './samples/train_{:02d}_{:04d}.png'.format(epoch, idx))
+                # save an image, with the original next to the generated one
+                orig_im = np.array(sample_image_orig)/127.5 - 1
+                merge_im = np.zeros( (256, 128, 3) )
+                merge_im[:128, :, :] = sample[0][0]
+                merge_im[128:, :, :] = orig_im
+                imsave('./samples/train_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
 
                 print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
 
