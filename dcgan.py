@@ -130,7 +130,7 @@ def create_discriminator(inputs):
 with tf.variable_scope("discriminators") as scope:
     disc_real = create_discriminator(real_ims)
     scope.reuse_variables()
-    disc_fake = create_discriminator(net)
+    disc_fake = create_discriminator(gen_train)
     
 
 
@@ -244,10 +244,7 @@ with tf.Session() as sess:
                 rand_idx = np.random.randint(len(data_test))
                 sample_image = np.array(imresize(imread(data_test[rand_idx]), 0.25)).astype(np.float32)
 
-                sample, d_loss, g_loss = sess.run(
-                    [gen_sample, d_loss, g_loss],
-                    feed_dict={inputs: batch_inputs, real_ims: sample_image}
-                )
+                sample = sess.run([gen_sample], feed_dict={sample_input: sample_image})
 
                 imsave('./samples/train_{:02d}_{:04d}.png'.format(epoch, idx), sample)
 
