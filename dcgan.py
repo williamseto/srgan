@@ -1,6 +1,6 @@
 
 
-from scipy.misc import imread, imshow, imresize
+from scipy.misc import imread, imshow, imresize, imsave
 import os
 from glob import glob
 import numpy as np
@@ -38,17 +38,21 @@ real_ims = tf.placeholder(tf.float32, [batch_size, image_h, image_w, 3], name='r
 # the input to the generator is a downsampled version of the real image
 inputs = tf.placeholder(tf.float32, [batch_size, image_h/4, image_w/4, 3], name='inputs')
 
+# ToDo: describe
+sample_input = tf.placeholder(tf.float32, [1, image_h/4, image_w/4, 3], name='sample_input')
+
 # add biases???
 
 # generator section
 print "GENERATOR"
 print "-----------"
-with tf.variable_scope("generator") as scope:
+
+def create_generator(inputs, b_train=True):
     with slim.arg_scope([slim.conv2d, slim.conv2d_transpose],
                         padding='SAME',
                         activation_fn=tf.nn.relu,
                         normalizer_fn=slim.batch_norm,
-                        normalizer_params={'is_training':True,
+                        normalizer_params={'is_training':b_train,
                                            'decay':0.997,
                                            'epsilon':1e-5,
                                            'scale':True},
@@ -79,9 +83,15 @@ with tf.variable_scope("generator") as scope:
         net = slim.conv2d_transpose(net, 3, [5, 5], scope='deconv6', activation_fn=tf.nn.tanh)
         print_shape(net)
 
-        # generate downsampled outputs
-        outputs = tf.image.resize_images(net, [image_h/4, image_w/4])
-        print_shape(outputs)
+        # # generate downsampled outputs
+        # outputs = tf.image.resize_images(net, [image_h/4, image_w/4])
+        # print_shape(outputs)
+        return net
+
+with tf.variable_scope("generator") as scope:
+    gen_train = create_generator(inputs)
+    scope.reuse_variables()
+    gen_sample = create_generator(sample_input)
     
 print "DISCRIMINATOR"
 print "--------------"
@@ -171,8 +181,6 @@ weight_saver = tf.train.Saver(max_to_keep=1)
 print "initialization done"
 
 
-
-
 #############
 # TRAINING
 ############
@@ -225,20 +233,30 @@ with tf.Session() as sess:
             errD_real = d_loss_real.eval({real_ims: batch_images})
             errG = g_loss.eval({inputs: batch_inputs})
 
-            #counter += 1
+            counter += 1
             print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
                 % (epoch, idx, num_batches,
                     time.time() - start_time, errD_fake+errD_real, errG))
 
-#             # every 100 steps, save some images to see performance of network
-#             if np.mod(counter, 100) == 1:
-#                 samples, d_loss, g_loss = sess.run(
-#                     [self.sampler, d_loss, g_loss],
-#                     feed_dict={self.z: sample_z, self.images: sample_images}
-#                 )
-#                 save_images(samples, [8, 8],
-#                             './samples/train_{:02d}_{:04d}.png'.format(epoch, idx))
-#                 print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
+            # every 500 steps, save some images to see performance of network
+            if np.mod(counter, 500) == 1:
 
-#             if np.mod(counter, 500) == 2:
-#                 self.save(checkpoint_dir, counter)
+                rand_idx = np.random.randint(len(data_test))
+                sample_image = np.array(imresize(imread(data_test[rand_idx]), 0.25)).astype(np.float32)
+
+                sample, d_loss, g_loss = sess.run(
+                    [gen_sample, d_loss, g_loss],
+                    feed_dict={inputs: batch_inputs, real_ims: sample_image}
+                )
+
+                imsave('./samples/train_{:02d}_{:04d}.png'.format(epoch, idx), sample)
+
+                # save_images(samples, [8, 8],
+                #             './samples/train_{:02d}_{:04d}.png'.format(epoch, idx))
+
+                print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
+
+            if np.mod(counter, 1000) == 2:
+                weight_saver.save(sess, 'checkpoint/model', counter)
+                print "saving a checkpoint"
+
