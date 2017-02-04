@@ -177,10 +177,16 @@ print "initialization done"
 # TRAINING
 ############
 
+data_dir = '/home/wseto/datasets/img_align_celeba128'
+data = glob(os.path.join(data_dir, "*.png"))
+data_train, data_test = train_test_split(data, test_size=0.2, random_state=42)
+
+
 print "TRAINING"
 print "-----------"
 
 start_time = time.time()
+counter = 0
 
 with tf.Session() as sess:
     tf.global_variables_initializer().run()
@@ -226,8 +232,8 @@ with tf.Session() as sess:
 
 #             # every 100 steps, save some images to see performance of network
 #             if np.mod(counter, 100) == 1:
-#                 samples, d_loss, g_loss = self.sess.run(
-#                     [self.sampler, self.d_loss, self.g_loss],
+#                 samples, d_loss, g_loss = sess.run(
+#                     [self.sampler, d_loss, g_loss],
 #                     feed_dict={self.z: sample_z, self.images: sample_images}
 #                 )
 #                 save_images(samples, [8, 8],
@@ -235,4 +241,4 @@ with tf.Session() as sess:
 #                 print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
 
 #             if np.mod(counter, 500) == 2:
-#                 self.save(config.checkpoint_dir, counter)
+#                 self.save(checkpoint_dir, counter)
