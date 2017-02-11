@@ -42,6 +42,59 @@ def residual(inputs, name="res"):
         net = net + inputs
         return net
 
+def create_VGG5_4(inputs):
+    with slim.arg_scope([slim.conv2d], trainable=False):
+        net = slim.conv2d(inputs, 64, [3, 3], scope='conv1_1')
+        net = slim.conv2d(net, 64, [3, 3], scope='conv1_2')
+        net = slim.max_pool2d(net, [2, 2], 2, scope='pool1')
+        net = slim.conv2d(net, 128, [3, 3], scope='conv2_1')
+        net = slim.conv2d(net, 128, [3, 3], scope='conv2_2')
+        net = slim.max_pool2d(net, [2, 2], 2, scope='pool2')
+        net = slim.conv2d(net, 256, [3, 3], scope='conv3_1')
+        net = slim.conv2d(net, 256, [3, 3], scope='conv3_2')
+        net = slim.conv2d(net, 256, [3, 3], scope='conv3_3')
+        net = slim.conv2d(net, 256, [3, 3], scope='conv3_4')
+        net = slim.max_pool2d(net, [2, 2], 2, scope='pool3')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv4_1')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv4_2')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv4_3')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv4_4')
+        net = slim.max_pool2d(net, [2, 2], 2, scope='pool4')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv5_1')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv5_2')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv5_3')
+        net = slim.conv2d(net, 512, [3, 3], scope='conv5_4')
+
+    return net
+
+# need to convert images to 224x224 before input to VGGnet
+def vgg_process_image(img):
+    '''Crops, scales, and normalizes the given image.
+    scale : The image wil be first scaled to this size.
+            If isotropic is true, the smaller side is rescaled to this,
+            preserving the aspect ratio.
+    crop  : After scaling, a central crop of this size is taken.
+    mean  : Subtracted from the image
+    '''
+
+    scale = 256
+    crop = 224
+
+    # isotropic Rescale
+    img_shape = tf.to_float(tf.shape(img)[:2])
+    min_length = tf.minimum(img_shape[0], img_shape[1])
+    new_shape = tf.to_int32((scale / min_length) * img_shape)
+
+    img = tf.image.resize_images(img, [new_shape[0], new_shape[1]])
+    # Center crop
+    # Use the slice workaround until crop_to_bounding_box supports deferred tensor shapes
+    # See: https://github.com/tensorflow/tensorflow/issues/521
+    offset = (new_shape - crop) / 2
+    img = tf.slice(img, begin=tf.pack([0, offset[0], offset[1], 0]), size=tf.pack([-1, crop, crop, -1]))
+
+    # # Mean subtraction
+    # return tf.to_float(img) - mean
+    return tf.to_float(img)
 
 
 ########
@@ -113,34 +166,44 @@ with tf.variable_scope("generator") as scope:
 print "DISCRIMINATOR"
 print "--------------"
 
+
+# ToDo: activation before batch norm?
 def create_discriminator(inputs):
     with slim.arg_scope([slim.conv2d],
                     padding='SAME',
-                    activation_fn=tf.nn.relu,
+                    activation_fn=lrelu,
                     normalizer_fn=slim.batch_norm,
-                    normalizer_params={'is_training':True,
-                                       'decay':0.997,
-                                       'epsilon':1e-5,
-                                       'scale':True},
-                    stride=2,
-                    weights_initializer=tf.truncated_normal_initializer(stddev=0.0001),
+                    weights_initializer=tf.truncated_normal_initializer(stddev=0.02),
                     weights_regularizer=slim.l2_regularizer(0.0005)):
-        disc = slim.conv2d(inputs, 64, [5, 5], scope='conv1')
+
+        disc = slim.conv2d(inputs, 64, [3, 3], normalizer_fn=None, scope='conv1')
         print_shape(disc)
 
-        disc = slim.conv2d(disc, 128, [5, 5], scope='conv2')
+        disc = slim.conv2d(disc, 64, [3, 3], stride=2, scope='conv2')
         print_shape(disc)
 
-        disc = slim.conv2d(disc, 256, [5, 5], scope='conv3')
+        disc = slim.conv2d(disc, 128, [3, 3], scope='conv3')
         print_shape(disc)
 
-        disc = slim.conv2d(disc, 512, [5, 5], scope='conv4')
+        disc = slim.conv2d(disc, 128, [3, 3], stride=2, scope='conv4')
         print_shape(disc)
 
-        disc = slim.conv2d(disc, 512, [5, 5], scope='conv5')
+        disc = slim.conv2d(disc, 256, [3, 3], scope='conv5')
         print_shape(disc)
 
-    disc_logits = slim.fully_connected(tf.contrib.layers.flatten(disc), 1, activation_fn=None, scope='fc6')
+        disc = slim.conv2d(disc, 256, [3, 3], stride=2, scope='conv6')
+        print_shape(disc)
+
+        disc = slim.conv2d(disc, 512, [3, 3], scope='conv7')
+        print_shape(disc)
+
+        disc = slim.conv2d(disc, 512, [3, 3], stride=2, scope='conv8')
+        print_shape(disc)
+
+        disc = slim.fully_connected(tf.contrib.layers.flatten(disc), 1024, normalizer_fn=None, scope='fc9')
+        print_shape(disc)
+
+    disc_logits = slim.fully_connected(tf.contrib.layers.flatten(disc), 1, activation_fn=None, scope='fc10')
     return disc_logits
 
 # create 2 discriminators: for fake and real images
@@ -148,7 +211,6 @@ with tf.variable_scope("discriminators") as scope:
     disc_real = create_discriminator(real_ims)
     scope.reuse_variables()
     disc_fake = create_discriminator(gen)
-    
 
 
 # Losses
@@ -168,10 +230,15 @@ g_loss_adv = tf.reduce_mean( \
 
 # L2 LOSS
 
-diff_mse = tf.contrib.layers.flatten(gen - real_ims)
+# loss between output feature maps of VGGnet
+with tf.variable_scope("") as scope:
+    vgg_real = create_VGG5_4(vgg_process_image(real_ims))
+    scope.reuse_variables()
+    vgg_fake = create_VGG5_4(vgg_process_image(gen))
+
+diff_mse = tf.contrib.layers.flatten(vgg_real - vgg_fake)
 sum_mse = tf.reduce_sum(tf.square(diff_mse), 1)
 g_loss_L2 = tf.reduce_mean(sum_mse)
-
 
 g_loss = g_loss_L2
 # d_loss_real_sum = tf.summary.scalar("d_loss_real", d_loss_real)
@@ -226,10 +293,16 @@ with tf.Session() as sess:
 
         np.random.shuffle(data_train)
 
+        # load VGG weights
+        optimistic_restore(sess, '/home/wseto/dcgan/vgg_checkpoint/model-1')
+        print "loaded vgg weights"
+
         if b_load:
             ckpt = tf.train.get_checkpoint_state('/home/wseto/dcgan/checkpoint')
-            weight_saver.restore(sess, ckpt.model_checkpoint_path)
-            counter = int(ckpt.model_checkpoint_path.split('-', 1)[1]) 
+            # weight_saver.restore(sess, ckpt.model_checkpoint_path)
+            counter = int(ckpt.model_checkpoint_path.split('-', 1)[1])
+
+            optimistic_restore(sess, '/home/wseto/dcgan/checkpoint/model-103002')
             print "successfuly restored!" + " counter:", counter
 
         for idx in xrange(num_batches):
@@ -253,8 +326,8 @@ with tf.Session() as sess:
             # Run g_optim twice to make sure that d_loss does not go to zero (different from paper)
             #sess.run([g_optim], feed_dict={ inputs: batch_inputs })
 
-            errD_fake = 0 #d_loss_fake.eval({inputs: batch_inputs})
-            errD_real = 0 #d_loss_real.eval({real_ims: batch_images})
+            errD_fake = d_loss_fake.eval({inputs: batch_inputs})
+            errD_real = d_loss_real.eval({real_ims: batch_images})
             errG = g_loss.eval({ inputs: batch_inputs, real_ims: batch_images})
 
             counter += 1
@@ -263,7 +336,7 @@ with tf.Session() as sess:
                     time.time() - start_time, errD_fake+errD_real, errG))
 
             # every 500 steps, save some images to see performance of network
-            if np.mod(counter, 500) == 1:
+            if np.mod(counter, 25) == 1:
 
                 rand_idx = np.random.randint(len(data_test))
                 sample_image_orig = imread(data_test[rand_idx]).astype(np.float)
@@ -277,11 +350,11 @@ with tf.Session() as sess:
                 merge_im[:, :128, :] = sample_image_orig
                 merge_im[:, 128:256, :] = resz_input
                 merge_im[:, 256:, :] = (sample[0][0]+1)*127.5
-                imsave('./samples/train_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
+                imsave('./samples_gan/train_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
 
                 #print("[Sample] d_loss: %.8f, g_loss: %.8f" % (d_loss, g_loss))
 
             if np.mod(counter, 1000) == 2:
-                weight_saver.save(sess, 'checkpoint/model', counter)
+                weight_saver.save(sess, 'checkpoint_gan/model', counter)
                 print "saving a checkpoint"
 
