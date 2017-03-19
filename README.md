@@ -1,4 +1,4 @@
-# dcgan
+# srgan
 
 
-download the VGG checkpoint from: https://cmu.box.com/shared/static/l6r8p5yy11rbf9tfsz8xrln0jizc83z8.gz
+get datasets and saved checkpoints here: https://cmu.box.com/s/fzbtl9p2pehb4q6s94gam34ltaw1d2pg

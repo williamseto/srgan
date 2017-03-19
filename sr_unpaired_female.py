@@ -1,4 +1,6 @@
 
+# experiment: unpaired GAN with L2 loss on the low resolution images and
+# only female images in the discriminator
 
 from scipy.misc import imread, imshow, imresize, imsave
 import os
@@ -15,19 +17,23 @@ import pdb
 def print_shape(t):
     print(t.name, t.get_shape().as_list())
 
-# def optimistic_restore(session, save_file, graph=tf.get_default_graph()):
-#     reader = tf.train.NewCheckpointReader(save_file)
-#     saved_shapes = reader.get_variable_to_shape_map()
-#     var_names = sorted([(var.name, var.name.split(':')[0]) for var in tf.global_variables()
-#             if var.name.split(':')[0] in saved_shapes])    
-#     restore_vars = []    
-#     for var_name, saved_var_name in var_names:            
-#         curr_var = graph.get_tensor_by_name(var_name)
-#         var_shape = curr_var.get_shape().as_list()
-#         if var_shape == saved_shapes[saved_var_name]:
-#             restore_vars.append(curr_var)
-#     opt_saver = tf.train.Saver(restore_vars)
-#     opt_saver.restore(session, save_file)
+# takes list of filenames and returns a 4D batch of images
+# [N x W x H x C]
+# also resize if necessary
+def get_images(filenames, imsize=None):
+
+    if imsize:
+        batch_orig = [imresize(imread(path), (imsize, imsize), interp='bicubic') for path in filenames]
+    else:
+        batch_orig = [imread(path)for path in filenames]
+
+    batch_orig_normed = np.array(batch_orig).astype(np.float32)/127.5-1
+
+    batch_inputs = [imresize(im, 0.25, interp='bicubic') for im in batch_orig]
+    # imresize returns in [0-255] so we have to normalize again
+    batch_inputs_normed = np.array(batch_inputs).astype(np.float32)/127.5-1
+
+    return batch_orig_normed, batch_inputs_normed
 
 def lrelu(x, leak=0.2, name="lrelu"):
     with tf.variable_scope(name):
@@ -35,14 +41,6 @@ def lrelu(x, leak=0.2, name="lrelu"):
         f2 = 0.5 * (1 - leak)
         return f1 * x + f2 * abs(x)
 
-# def residual(inputs, name="res"):
-#     with tf.variable_scope(name) as scope:
-#         with slim.arg_scope([slim.conv2d], normalizer_fn=slim.batch_norm, activation_fn=None):
-
-#             net = slim.conv2d(inputs, 64, [3, 3])
-#             net = slim.conv2d(net, 64, [3, 3], activation_fn=None)
-#             net = net + inputs
-#             return net
 
 # create scratch variable scope to get around reuse=True issues with
 # temporary variables
@@ -86,13 +84,6 @@ class batch_norm(object):
 
         return normed
 
-# this is really bad
-batch_norm_list = []
-nb_residual = 10
-n_extra_bn = 1
-for n in range(nb_residual*2 + n_extra_bn):
-    batch_norm_list.append(batch_norm(name='bn'+str(n)))
-
 
 
 ########
@@ -122,6 +113,13 @@ inputs = tf.placeholder(tf.float32, [None, image_h/4, image_w/4, 3], name='input
 print "GENERATOR"
 print "-----------"
 
+# this is really bad
+batch_norm_list = []
+nb_residual = 8
+n_extra_bn = 1
+for n in range(nb_residual*2 + n_extra_bn):
+    batch_norm_list.append(batch_norm(name='bn'+str(n)))
+
 def create_generator(inputs, b_training=True):
     with slim.arg_scope([slim.conv2d, slim.conv2d_transpose],
                         padding='SAME',
@@ -132,7 +130,7 @@ def create_generator(inputs, b_training=True):
         net = inputs
         print_shape(net)
 
-        net = tf.nn.relu(slim.conv2d(net, 64, [3, 3], scope='conv1'))
+        net = tf.nn.relu(slim.conv2d(net, 64, [3, 3], scope='gconv1'))
         print_shape(net)
 
         net1 = net
@@ -147,7 +145,7 @@ def create_generator(inputs, b_training=True):
 
         print_shape(net)
 
-        net = batch_norm_list[-1](slim.conv2d(net, 64, [3, 3], scope='conv2'), train=b_training) + net1
+        net = batch_norm_list[-1](slim.conv2d(net, 64, [3, 3], scope='gconv2'), train=b_training) + net1
         print_shape(net)
 
         # deconv
@@ -159,10 +157,10 @@ def create_generator(inputs, b_training=True):
 
 
         # tanh since images have range [-1,1]
-        net = slim.conv2d(net, 3, [3, 3], scope='conv3', activation_fn=tf.nn.tanh)
+        net = slim.conv2d(net, 3, [3, 3], scope='gconv3', activation_fn=tf.nn.tanh)
         print_shape(net)
 
-        return net
+    return net
 
 with tf.variable_scope("generator") as scope:
     gen = create_generator(inputs)
@@ -189,20 +187,6 @@ def create_discriminator(inputs):
 
         noisy_inputs = inputs + tf.random_normal(shape=tf.shape(inputs), mean=0.0, stddev=0.05, dtype=tf.float32)
 
-        # disc = slim.conv2d(noisy_inputs, 64, [5, 5], scope='conv1')
-        # print_shape(disc)
-
-        # disc = slim.conv2d(disc, 128, [5, 5], scope='conv2')
-        # print_shape(disc)
-
-        # disc = slim.conv2d(disc, 256, [5, 5], scope='conv3')
-        # print_shape(disc)
-
-        # disc = slim.conv2d(disc, 512, [5, 5], scope='conv4')
-        # print_shape(disc)
-
-        # disc = slim.conv2d(disc, 512, [5, 5], scope='conv5')
-        # print_shape(disc)
         disc = lrelu(slim.conv2d(noisy_inputs, 64, [5, 5], scope='conv1'))
         print_shape(disc)
 
@@ -232,39 +216,48 @@ with tf.variable_scope("discriminators") as scope:
 
 # loss on real input images; all outputs should be 1
 
-# make labels noisy
-if np.random.rand() < 0.8:
-    labels_real = tf.ones_like(disc_real)
-    labels_fake = tf.zeros_like(disc_fake)
-else:
-    labels_real = tf.zeros_like(disc_real)
-    labels_fake = tf.ones_like(disc_fake)
+# make labels noisy for discriminator
+rand_val = tf.random_uniform([], seed=42)
+labels_real = tf.cond(rand_val < 0.95, lambda: tf.ones_like(disc_real), lambda: tf.zeros_like(disc_real))
+labels_fake = tf.cond(rand_val < 0.95, lambda: tf.zeros_like(disc_fake), lambda: tf.ones_like(disc_fake))
 
 d_loss_real = tf.reduce_mean( \
-    tf.nn.sigmoid_cross_entropy_with_logits(disc_real, labels_real))
+    tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_real, labels=labels_real))
 
 # loss on fake input images, fakes should be 0
 d_loss_fake = tf.reduce_mean( \
-    tf.nn.sigmoid_cross_entropy_with_logits(disc_fake, labels_fake))
+    tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_fake, labels=labels_fake))
 
 # similar to above, but we want fake (generator) images to output 1
 g_loss_adv = tf.reduce_mean( \
-    tf.nn.sigmoid_cross_entropy_with_logits(disc_fake, tf.ones_like(disc_fake)))
+    tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_fake, labels=tf.ones_like(disc_fake)))
 
 
-# L2 LOSS
+# Losses
 
-# pretend we don't have ground truth so all we can do is 
-# do reconstruction loss on the input
-outputs = tf.image.resize_images(gen, [image_h/4, image_w/4])
+# metric: L2 between downsampled generated output and input
+gen_LR = tf.image.resize_images(gen, [image_h/4, image_w/4])
+gen_mse_LR = tf.reduce_mean(tf.square(tf.contrib.layers.flatten(gen_LR - inputs)), 1)
+gen_L2_LR = tf.reduce_mean(gen_mse_LR)
 
-diff_mse = tf.contrib.layers.flatten(outputs - inputs)
-sum_mse = tf.reduce_sum(tf.square(diff_mse), 1)
-g_loss_L2 = tf.reduce_mean(sum_mse/(3*(image_h/4)*(image_h/4)))
+# metric: L2 between generated output and the original image
+gen_mse_HR = tf.reduce_mean(tf.square(tf.contrib.layers.flatten(gen - real_ims)), 1)
+# average for the batch
+gen_L2_HR = tf.reduce_mean(gen_mse_HR)
 
-g_loss = g_loss_L2 + 0.05*g_loss_adv
+# metric: PSNR between generated output and original input
+gen_rmse_HR = tf.sqrt(gen_mse_HR)
+gen_PSNR = tf.reduce_mean(20*tf.log(1.0/gen_rmse_HR)/tf.log(tf.constant(10, dtype=tf.float32)))
 
-d_loss = d_loss_real + d_loss_fake
+# baselines: L2 and PSNR between bicubic upsampled input and original image
+upsampled_output = tf.image.resize_bicubic(inputs, [image_h, image_h])
+ups_mse_HR = tf.reduce_mean(tf.square(tf.contrib.layers.flatten(upsampled_output - real_ims)), 1)
+ups_L2_HR = tf.reduce_mean(ups_mse_HR)
+
+ups_rmse_HR = tf.sqrt(ups_mse_HR)
+ups_PSNR = tf.reduce_mean(20*tf.log(1.0/ups_rmse_HR)/tf.log(tf.constant(10, dtype=tf.float32)))
+
+# ToDo: add SSIM metric
 
 
 
@@ -274,12 +267,33 @@ g_vars = [var for var in train_vars if 'generator' in var.name]
 
 
 # optimize the generator and discriminator separately
+g_loss = gen_L2_LR + 0.05*g_loss_adv
+d_loss = d_loss_real + d_loss_fake
+
 d_optim = tf.train.AdamOptimizer(adam_learning_rate, beta1=adam_beta1) \
                   .minimize(d_loss, var_list=d_vars)
 g_optim = tf.train.AdamOptimizer(adam_learning_rate, beta1=adam_beta1) \
                   .minimize(g_loss, var_list=g_vars)
     
 weight_saver = tf.train.Saver(max_to_keep=1)
+
+
+# logging
+
+tf.summary.scalar("d_loss", d_loss)
+tf.summary.scalar("g_loss_L2_LR", gen_L2_LR)
+tf.summary.scalar("g_loss_adv", g_loss_adv)
+
+tf.summary.scalar("gen_L2_HR", gen_L2_HR)
+tf.summary.scalar("gen_PSNR_HR", gen_PSNR)
+tf.summary.scalar("ups_L2_HR", ups_L2_HR)
+tf.summary.scalar("ups_PSNR_HR", ups_PSNR)
+
+merged_summary = tf.summary.merge_all()
+train_writer = tf.summary.FileWriter('./logs_f_128/train')
+test_writer = tf.summary.FileWriter('./logs_f_128/test')
+
+
 
 print "initialization done"
 
@@ -288,11 +302,32 @@ print "initialization done"
 # TRAINING
 ############
 
-data_dir = '/home/wseto/datasets/img_align_celeba128'
-#data_dir = '/home/wseto/datasets/wiki_align'
-data = glob(os.path.join(data_dir, "*.png"))
-data_train, data_test = train_test_split(data, test_size=0.2, random_state=42)
+female_data_dir = '/home/wseto/datasets/celeba_female'
+male_data_dir = '/home/wseto/datasets/celeba_male'
 
+female_data = glob(os.path.join(female_data_dir, "*.png"))
+male_data = glob(os.path.join(male_data_dir, "*.png"))
+
+data_disc, female_data_nondisc = train_test_split(female_data, test_size=0.5, random_state=42)
+
+female_data_train, female_data_sample = train_test_split(female_data_nondisc, test_size=0.1, random_state=42)
+male_data_train, male_data_sample = train_test_split(male_data, test_size=0.1, random_state=42)
+
+data_train = female_data_train + male_data_train
+data_sample = female_data_sample + male_data_sample
+
+print "data train:", len(data_train)
+print "data disc:", len(data_disc)
+print "data sample:", len(data_sample)
+
+# create directories to save checkpoint and samples
+samples_dir = 'samples_female'
+if not os.path.exists(samples_dir):
+    os.makedirs(samples_dir)
+
+checkpoint_dir = 'checkpoint_female'
+if not os.path.exists(checkpoint_dir):
+    os.makedirs(checkpoint_dir)
 
 print "TRAINING"
 print "-----------"
@@ -301,11 +336,10 @@ start_time = time.time()
 counter = 0
 
 b_load = False
+#ckpt_dir = '/home/wseto/dcgan/checkpoint_bn'
 
-config = tf.ConfigProto()
-config.gpu_options.allow_growth=True
 
-with tf.Session(config=config) as sess:
+with tf.Session() as sess:
     tf.global_variables_initializer().run()
 
     num_batches = len(data_train) // batch_size
@@ -315,73 +349,68 @@ with tf.Session(config=config) as sess:
         np.random.shuffle(data_train)
 
         if b_load:
-            ckpt = tf.train.get_checkpoint_state('/home/wseto/dcgan/checkpoint')
+            ckpt = tf.train.get_checkpoint_state(ckpt_dir)
             weight_saver.restore(sess, ckpt.model_checkpoint_path)
             counter = int(ckpt.model_checkpoint_path.split('-', 1)[1]) 
             print "successfuly restored!" + " counter:", counter
 
         for idx in xrange(num_batches):
             batch_filenames = data_train[idx*batch_size : (idx+1)*batch_size]
-            #batch = [imread(path) for path in batch_filenames]
-            batch = [Image.open(path) for path in batch_filenames]
-            batch_np = [np.array(im_obj) for im_obj in batch]
-            batch_images = np.array(batch_np).astype(np.float32)/127.5-1
             
-            # downsample images before feeding to generator
-            # ToDo: should do this before training
-            #batch_inputs = [imresize(im, 0.25) for im in batch]
-            batch_inputs = [np.array(im.resize((image_h/4, image_w/4), Image.BICUBIC)) for im in batch]
-            batch_inputs = np.array(batch_inputs).astype(np.float32)/127.5-1
+            batch_origs, batch_inputs = get_images(batch_filenames)
+            
+            # discriminator batch is different since we are doing unpaired experiment
+            rand_idx = np.random.randint(len(data_disc)-batch_size-1)
+            disc_batch_files = data_disc[rand_idx: rand_idx+batch_size]     
+            disc_batch_orig, disc_batch_inputs = get_images(disc_batch_files, imsize=image_h)
 
-            rand_idx = np.random.randint(len(data_test)-batch_size-1)
-            disc_batch_files = data_test[rand_idx: rand_idx+batch_size]
-            disc_batch = [imread(path) for path in disc_batch_files]
-            disc_batch_images = np.array(disc_batch).astype(np.float32)/127.5-1
-
-            #pdb.set_trace()
-            sess.run([d_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_images})
-
-
+            # Update D network
+            sess.run([d_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
             # Update G network
-            sess.run([g_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_images})
+            sess.run([g_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
             # Run g_optim twice to make sure that d_loss does not go to zero
-            sess.run([g_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_images})
+            sess.run([g_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
+
 
             errD_fake = d_loss_fake.eval({inputs: batch_inputs})
-            errD_real = d_loss_real.eval({real_ims: disc_batch_images})
-
-
-            errG = g_loss.eval({ inputs: batch_inputs, real_ims: disc_batch_images})
+            errD_real = d_loss_real.eval({real_ims: disc_batch_orig})
+            errG = g_loss.eval({ inputs: batch_inputs, real_ims: disc_batch_orig})
 
             counter += 1
             print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
                 % (epoch, idx, num_batches,
                     time.time() - start_time, errD_fake+errD_real, errG))
 
-            # every 500 steps, save some images to see performance of network
-            if np.mod(counter, 500) == 1:
 
-                rand_idx = np.random.randint(len(data_train))
-                sample_image_orig = Image.open(data_train[rand_idx])
-                # looks nasty, but we are making it 4D
-                sample_image = np.array([np.array(sample_image_orig.resize((image_h/4, image_w/4), Image.BICUBIC))]).astype(np.float32)
-                sample_input = sample_image/127.5-1
-                real_input = (np.array([np.array(sample_image_orig)]))/127.5-1
-                #sample = sess.run([gen_test], feed_dict={inputs: (sample_image/127.5-1)})
-                sample, loss = sess.run([gen_test, g_loss], feed_dict={inputs: sample_input, real_ims: real_input})
+
+            if np.mod(counter, 30) == 1:
+
+                # only for the purposes of computing metrics, pass in original images
+                train_summary = sess.run([merged_summary], feed_dict={ inputs: batch_inputs, real_ims: batch_origs})
+                train_writer.add_summary(train_summary[0], counter)
+
+                rand_idx = np.random.randint(len(data_sample)-batch_size+1)
+                sample_origs, sample_inputs = get_images(data_sample[rand_idx: rand_idx+batch_size])
+
+                sample, loss = sess.run([gen_test, g_loss], feed_dict={inputs: sample_inputs, real_ims: disc_batch_orig})
                 print "Sample loss: ", loss
+
+                img_summary = tf.summary.image("test_image{:06d}".format(counter), gen_test)
+                test_summary, test_img_summary = sess.run([merged_summary, img_summary], feed_dict={ inputs: sample_inputs, real_ims: sample_origs})
+                test_writer.add_summary(test_summary, counter)
+
+
                 sample = [sample]
-
                 # save an image, with the original next to the generated one
-                resz_input = sample_image[0].repeat(axis=0,repeats=4).repeat(axis=1,repeats=4)
+                resz_input = sample_inputs[0].repeat(axis=0,repeats=4).repeat(axis=1,repeats=4)
                 merge_im = np.zeros( (image_h, image_h*3, 3) )
-                merge_im[:, :image_h, :] = np.array(sample_image_orig)
-                merge_im[:, image_h:image_h*2, :] = resz_input
+                merge_im[:, :image_h, :] = (sample_origs[0]+1)*127.5
+                merge_im[:, image_h:image_h*2, :] = (resz_input+1)*127.5
                 merge_im[:, image_h*2:, :] = (sample[0][0]+1)*127.5
-                imsave('./samples/train_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
-
+                imsave(samples_dir + '/test_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
 
             if np.mod(counter, 1000) == 2:
-                weight_saver.save(sess, 'checkpoint_bn/model', counter)
+                weight_saver.save(sess, checkpoint_dir + '/model', counter)
                 print "saving a checkpoint"
+
 
