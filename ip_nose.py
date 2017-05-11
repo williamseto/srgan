@@ -12,7 +12,7 @@ import tensorflow.contrib.slim as slim
 import pickle
 
 
-with open("nose_bb.pickle", "rb") as fp:
+with open("nose_bb64.pickle", "rb") as fp:
     mouth_bb_dict = pickle.load(fp)
 
 
@@ -176,7 +176,7 @@ disc_bn1 = batch_norm(name='d_bn1')
 disc_bn2 = batch_norm(name='d_bn2')
 disc_bn3 = batch_norm(name='d_bn3')
 
-def create_discriminator(inputs):
+def create_discriminator(inputs, b_reuse=False):
     with slim.arg_scope([slim.conv2d],
                     padding='SAME',
                     activation_fn=None,
@@ -186,13 +186,13 @@ def create_discriminator(inputs):
         disc = lrelu(slim.conv2d(inputs, 64, [5, 5], scope='dconv1'))
         print_shape(disc)
 
-        disc = lrelu(disc_bn1(slim.conv2d(disc, 128, [5, 5], scope='dconv2')))
+        disc = lrelu(disc_bn1(slim.conv2d(disc, 128, [5, 5], scope='dconv2'), b_reuse=b_reuse))
         print_shape(disc)
 
-        disc = lrelu(disc_bn2(slim.conv2d(disc, 256, [5, 5], scope='dconv3')))
+        disc = lrelu(disc_bn2(slim.conv2d(disc, 256, [5, 5], scope='dconv3'), b_reuse=b_reuse))
         print_shape(disc)
 
-        disc = lrelu(disc_bn3(slim.conv2d(disc, 512, [5, 5], scope='dconv4')))
+        disc = lrelu(disc_bn3(slim.conv2d(disc, 512, [5, 5], scope='dconv4'), b_reuse=b_reuse))
         print_shape(disc)
 
     disc_logits = slim.fully_connected(tf.contrib.layers.flatten(disc), 1, activation_fn=None, scope='fc5')
@@ -202,7 +202,7 @@ def create_discriminator(inputs):
 with tf.variable_scope("discriminators") as scope:
     disc_real = create_discriminator(real_ims)
     scope.reuse_variables()
-    disc_fake = create_discriminator(gen)
+    disc_fake = create_discriminator(gen, True)
     
 
 # Losses
