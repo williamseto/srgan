@@ -378,11 +378,13 @@ with tf.Session() as sess:
         ckpt = tf.train.get_checkpoint_state(ckpt_dir)
         weight_saver.restore(sess, ckpt.model_checkpoint_path)
         counter = int(ckpt.model_checkpoint_path.split('-', 1)[1]) 
-        print "successfuly restored!" + " counter:", counter
+        print "successfully restored!" + " counter:", counter
         
     for epoch in range(num_epochs):
 
         np.random.shuffle(data_train)
+
+        total_errD = 2
 
         for idx in xrange(num_batches):
             batch_filenames = data_train[idx*batch_size : (idx+1)*batch_size]
@@ -399,9 +401,15 @@ with tf.Session() as sess:
             # errD_real = d_loss_real.eval({real_ims: disc_batch_orig})
             # errG = g_loss.eval({ inputs: batch_inputs, real_ims: disc_batch_orig})
 
-            fetches = [d_loss_fake, d_loss_real, g_loss_adv, d_optim, g_optim]
+            if total_errD > 1:
+                fetches = [d_loss_fake, d_loss_real, g_loss_adv, d_optim, g_optim]
+                errD_fake, errD_real, errG, _, _ = sess.run(fetches, feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
+            else:
+                fetches = [d_loss_fake, d_loss_real, g_loss_adv, g_optim]
+                errD_fake, errD_real, errG, _ = sess.run(fetches, feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
 
-            errD_fake, errD_real, errG, _, _ = sess.run(fetches, feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
+            total_errD = errD_fake + errD_real
+
 
 
             counter += 1
