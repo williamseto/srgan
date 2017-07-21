@@ -53,14 +53,6 @@ def lrelu(x, leak=0.2, name="lrelu"):
         f2 = 0.5 * (1 - leak)
         return f1 * x + f2 * abs(x)
 
-# create scratch variable scope to get around reuse=True issues with
-# temporary variables
-# (hack around https://github.com/tensorflow/tensorflow/issues/5827)
-with tf.variable_scope("scratch", reuse=False) as scratch_varscope:
-    SCRATCH_VARSCOPE = scratch_varscope
-assert SCRATCH_VARSCOPE == scratch_varscope
-assert SCRATCH_VARSCOPE.reuse == False
-
 class batch_norm(object):
     """Code modification of http://stackoverflow.com/a/33950177"""
     def __init__(self, epsilon=1e-5, momentum = 0.9, name="batch_norm"):
@@ -71,7 +63,7 @@ class batch_norm(object):
             self.ema = tf.train.ExponentialMovingAverage(decay=self.momentum)
             self.name = name
 
-    def __call__(self, x, train=True):
+    def __call__(self, x, train=True, b_reuse=False):
         shape = x.get_shape().as_list()
 
         if train:
@@ -80,13 +72,16 @@ class batch_norm(object):
                                     initializer=tf.constant_initializer(0.))
                 self.gamma = tf.get_variable("gamma", [shape[-1]],
                                     initializer=tf.random_normal_initializer(1., 0.02))
-                with tf.variable_scope(SCRATCH_VARSCOPE) as scratch_varscope:
-                    assert scratch_varscope.reuse == False
+
+                # huge hack
+                with tf.variable_scope(tf.get_variable_scope(), reuse=False):
                     batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2], name='moments')
                     ema_apply_op = self.ema.apply([batch_mean, batch_var])
                     self.ema_mean, self.ema_var = self.ema.average(batch_mean), self.ema.average(batch_var)
+
                     with tf.control_dependencies([ema_apply_op]):
                         mean, var = tf.identity(batch_mean), tf.identity(batch_var)
+
         else:
             mean, var = self.ema_mean, self.ema_var
 
@@ -114,11 +109,11 @@ num_epochs = 20
 ###############################
 
 
-real_ims = tf.placeholder(tf.float32, [batch_size, image_h, image_w, 3], name='real_ims')
+real_ims = tf.placeholder(tf.float32, [None, image_h, image_w, 3], name='real_ims')
 
-inputs = tf.placeholder(tf.float32, [batch_size, image_h, image_w, 3], name='inputs')
+inputs = tf.placeholder(tf.float32, [None, image_h, image_w, 3], name='inputs')
 
-input_masks = tf.placeholder(tf.float32, [batch_size, image_h, image_w, 1], name='input_masks')
+input_masks = tf.placeholder(tf.float32, [None, image_h, image_w, 1], name='input_masks')
 
 
 # generator section
@@ -155,7 +150,7 @@ def create_generator(inputs, input_masks, b_train=True):
         net_mask = tf.nn.relu(gen_bn_m2(slim.conv2d(net_mask, 1024, [3, 3], scope='gconv_m2'), train=b_train))
 
 
-        net = tf.concat(3, [net_mask, net])
+        net = tf.concat([net_mask, net], 3)
         #print_shape(net)
 
         # decoder section
@@ -221,15 +216,15 @@ labels_real = tf.cond(rand_val < 1, lambda: tf.ones_like(disc_real), lambda: tf.
 labels_fake = tf.cond(rand_val < 1, lambda: tf.zeros_like(disc_fake), lambda: tf.ones_like(disc_fake))
 
 d_loss_real = tf.reduce_mean( \
-    tf.nn.sigmoid_cross_entropy_with_logits(disc_real, labels_real))
+    tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_real, labels=labels_real))
 
 # loss on fake input images, fakes should be 0
 d_loss_fake = tf.reduce_mean( \
-    tf.nn.sigmoid_cross_entropy_with_logits(disc_fake, labels_fake))
+    tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_fake, labels=labels_fake))
 
 # similar to above, but we want fake (generator) images to output 1
 g_loss_adv = tf.reduce_mean( \
-    tf.nn.sigmoid_cross_entropy_with_logits(disc_fake, tf.ones_like(disc_fake)))
+    tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_fake, labels=tf.ones_like(disc_fake)))
 
 
 
@@ -305,11 +300,11 @@ print "data disc:", len(data_disc)
 print "data sample:", len(data_sample)
 
 # create directories to save checkpoint and samples
-samples_dir = 'samples_ip_lips'
+samples_dir = 'samples_ip_lips5'
 if not os.path.exists(samples_dir):
     os.makedirs(samples_dir)
 
-checkpoint_dir = 'checkpoint_ip_lips'
+checkpoint_dir = 'checkpoint_ip_lips5'
 if not os.path.exists(checkpoint_dir):
     os.makedirs(checkpoint_dir)
 
@@ -318,7 +313,8 @@ print "-----------"
 
 start_time = time.time()
 counter = 0
-b_load = False
+b_load = True
+ckpt_dir = '/home/wseto/dcgan/checkpoint_ip_lips5'
 
 with tf.Session() as sess:
     tf.global_variables_initializer().run()
@@ -345,52 +341,47 @@ with tf.Session() as sess:
             disc_batch_files = data_disc[rand_idx: rand_idx+batch_size]     
             disc_batch_orig, disc_batch_inputs, _ = get_images(disc_batch_files, imsize=image_h)
 
-            # Update D network
-            sess.run([d_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig, input_masks: batch_masks})
-            # Update G network
-            sess.run([g_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig, input_masks: batch_masks})
+
+            fetches = [d_loss_fake, d_loss_real, g_loss_adv, d_optim, g_optim]
+            errD_fake, errD_real, errG, _, _ = sess.run(fetches, feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig, input_masks: batch_masks})
+
             # Run g_optim twice to make sure that d_loss does not go to zero
             sess.run([g_optim], feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig, input_masks: batch_masks})
 
-            errD_fake = d_loss_fake.eval({inputs: batch_inputs, input_masks: batch_masks})
-            errD_real = d_loss_real.eval({real_ims: disc_batch_orig})
-            errG = g_loss.eval({ inputs: batch_inputs, real_ims: batch_origs, input_masks: batch_masks})
 
             counter += 1
             print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
                 % (epoch, idx, num_batches,
                     time.time() - start_time, errD_fake+errD_real, errG))
 
-            train_summary = sess.run([merged_summary], feed_dict={ inputs: batch_inputs, real_ims: batch_origs, input_masks: batch_masks})
-            train_writer.add_summary(train_summary[0], counter)
+            # train_summary = sess.run([merged_summary], feed_dict={ inputs: batch_inputs, real_ims: batch_origs, input_masks: batch_masks})
+            # train_writer.add_summary(train_summary[0], counter)
 
 
             if np.mod(counter, 10) == 1:
 
                 rand_idx = np.random.randint(len(data_sample)-batch_size+1)
-                sample_origs, sample_inputs, sample_masks = get_images(data_sample[rand_idx: rand_idx+batch_size], imsize=image_h)
+                sample_origs, sample_inputs, sample_masks = get_images(data_sample[rand_idx: rand_idx+2], imsize=image_h)
 
                 sample, loss = sess.run([gen_test, g_loss], feed_dict={inputs: sample_inputs, real_ims: disc_batch_orig, input_masks: sample_masks})
                 print "Sample loss: ", loss
 
-                test_summary = sess.run([merged_summary], feed_dict={ inputs: sample_inputs, real_ims: sample_origs, input_masks: sample_masks})
-                test_writer.add_summary(test_summary[0], counter)
+                # test_summary = sess.run([merged_summary], feed_dict={ inputs: sample_inputs, real_ims: sample_origs, input_masks: sample_masks})
+                # test_writer.add_summary(test_summary[0], counter)
 
-                # every 500 steps, save some images to see performance of network
-                if np.mod(counter, 20) == 1:
-                    sample = [sample]
-                    # save an image, with the original next to the generated one
-                    merge_im = np.zeros( (image_h, image_h*4, 3) )
-                    merge_im[:, :image_h, :] = (sample_origs[0]+1)*127.5
-                    merge_im[:, image_h:image_h*2, :] = (sample_inputs[0]+1)*127.5
-                    merge_im[:, image_h*2:image_h*3, :] = (sample[0][0]+1)*127.5
+                sample = [sample]
+                # save an image, with the original next to the generated one
+                merge_im = np.zeros( (image_h, image_h*4, 3) )
+                merge_im[:, :image_h, :] = (sample_origs[0]+1)*127.5
+                merge_im[:, image_h:image_h*2, :] = (sample_inputs[0]+1)*127.5
+                merge_im[:, image_h*2:image_h*3, :] = (sample[0][0]+1)*127.5
 
-                    # final, final output: take the masked region from the generator output 
-                    # and put it together with our original masked input
+                # final, final output: take the masked region from the generator output 
+                # and put it together with our original masked input
 
-                    final_output = sample_inputs[0] + (1-sample_masks[0])*sample[0][0]
-                    merge_im[:, image_h*3:, :] = (final_output+1)*127.5
-                    imsave(samples_dir + '/test_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
+                final_output = sample_inputs[0] + (1-sample_masks[0])*sample[0][0]
+                merge_im[:, image_h*3:, :] = (final_output+1)*127.5
+                imsave(samples_dir + '/test_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
 
             if np.mod(counter, 1000) == 2:
                 weight_saver.save(sess, checkpoint_dir + '/model', counter)

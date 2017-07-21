@@ -63,32 +63,9 @@ class batch_norm(object):
             self.ema = tf.train.ExponentialMovingAverage(decay=self.momentum)
             self.name = name
 
-    def __call__(self, x, train=True, b_reuse=False):
-        shape = x.get_shape().as_list()
+    def __call__(self, x, train=True):
+        return tf.contrib.layers.batch_norm(x, decay=self.momentum, updates_collections=None, epsilon=self.epsilon, scale=True, scope=self.name, is_training=train)
 
-        if train:
-            with tf.variable_scope(self.name) as scope:
-                self.beta = tf.get_variable("beta", [shape[-1]],
-                                    initializer=tf.constant_initializer(0.))
-                self.gamma = tf.get_variable("gamma", [shape[-1]],
-                                    initializer=tf.random_normal_initializer(1., 0.02))
-
-                # huge hack
-                with tf.variable_scope(tf.get_variable_scope(), reuse=False):
-                    batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2], name='moments')
-                    ema_apply_op = self.ema.apply([batch_mean, batch_var])
-                    self.ema_mean, self.ema_var = self.ema.average(batch_mean), self.ema.average(batch_var)
-
-                    with tf.control_dependencies([ema_apply_op]):
-                        mean, var = tf.identity(batch_mean), tf.identity(batch_var)
-
-        else:
-            mean, var = self.ema_mean, self.ema_var
-
-        normed = tf.nn.batch_norm_with_global_normalization(
-                x, mean, var, self.beta, self.gamma, self.epsilon, scale_after_normalization=True)
-
-        return normed
 
 
 
@@ -176,7 +153,7 @@ disc_bn1 = batch_norm(name='d_bn1')
 disc_bn2 = batch_norm(name='d_bn2')
 disc_bn3 = batch_norm(name='d_bn3')
 
-def create_discriminator(inputs, b_reuse=False):
+def create_discriminator(inputs):
     with slim.arg_scope([slim.conv2d],
                     padding='SAME',
                     activation_fn=None,
@@ -186,13 +163,13 @@ def create_discriminator(inputs, b_reuse=False):
         disc = lrelu(slim.conv2d(inputs, 64, [5, 5], scope='dconv1'))
         print_shape(disc)
 
-        disc = lrelu(disc_bn1(slim.conv2d(disc, 128, [5, 5], scope='dconv2'), b_reuse=b_reuse))
+        disc = lrelu(disc_bn1(slim.conv2d(disc, 128, [5, 5], scope='dconv2')))
         print_shape(disc)
 
-        disc = lrelu(disc_bn2(slim.conv2d(disc, 256, [5, 5], scope='dconv3'), b_reuse=b_reuse))
+        disc = lrelu(disc_bn2(slim.conv2d(disc, 256, [5, 5], scope='dconv3')))
         print_shape(disc)
 
-        disc = lrelu(disc_bn3(slim.conv2d(disc, 512, [5, 5], scope='dconv4'), b_reuse=b_reuse))
+        disc = lrelu(disc_bn3(slim.conv2d(disc, 512, [5, 5], scope='dconv4')))
         print_shape(disc)
 
     disc_logits = slim.fully_connected(tf.contrib.layers.flatten(disc), 1, activation_fn=None, scope='fc5')
@@ -202,7 +179,7 @@ def create_discriminator(inputs, b_reuse=False):
 with tf.variable_scope("discriminators") as scope:
     disc_real = create_discriminator(real_ims)
     scope.reuse_variables()
-    disc_fake = create_discriminator(gen, True)
+    disc_fake = create_discriminator(gen)
     
 
 # Losses
