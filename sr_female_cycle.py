@@ -29,29 +29,41 @@ def optimistic_restore(session, save_file, graph=tf.get_default_graph()):
     opt_saver = tf.train.Saver(restore_vars)
     opt_saver.restore(session, save_file)
 
-# takes list of filenames and returns a 4D batch of images
-# [N x W x H x C]
-# also resize if necessary
-def get_images(filenames, imsize=None):
-
-    if imsize:
-        batch_orig = [imresize(imread(path), (imsize, imsize), interp='bicubic') for path in filenames]
-    else:
-        batch_orig = [imread(path)for path in filenames]
-
-    batch_orig_normed = np.array(batch_orig).astype(np.float32)/127.5-1
-
-    batch_inputs = [imresize(im, 0.25, interp='bicubic') for im in batch_orig]
-    # imresize returns in [0-255] so we have to normalize again
-    batch_inputs_normed = np.array(batch_inputs).astype(np.float32)/127.5-1
-
-    return batch_orig_normed, batch_inputs_normed
-
 def lrelu(x, leak=0.2, name="lrelu"):
     with tf.variable_scope(name):
         f1 = 0.5 * (1 + leak)
         f2 = 0.5 * (1 - leak)
         return f1 * x + f2 * abs(x)
+
+def input_pipeline(filenames, batch_size, num_epochs=None):
+    filename_queue = tf.train.string_input_producer(filenames, num_epochs=num_epochs, shuffle=True)
+    
+    filename = filename_queue.dequeue()
+    image_bytes = tf.read_file(filename)
+    decoded_image = tf.image.decode_png(image_bytes)
+    #decoded_image.set_shape([128,128,3])
+    normed_image = tf.to_float(decoded_image)/127.5 - 1
+
+    image_queue = tf.FIFOQueue(batch_size, tf.float32, shapes=(128,128,3))
+    enqueue_op = image_queue.enqueue(normed_image)
+
+    # Create a queue runner that will enqueue decoded images into `image_queue`.                                                                                   
+    NUM_THREADS = 8
+    queue_runner = tf.train.QueueRunner(
+        image_queue,
+        [enqueue_op] * NUM_THREADS,  # Each element will be run from a separate thread.                                                                                       
+        image_queue.close(),
+        image_queue.close(cancel_pending_enqueues=True))
+
+    # Ensure that the queue runner threads are started when we call                                                                                               
+    # `tf.train.start_queue_runners()` below.                                                                                                                      
+    tf.train.add_queue_runner(queue_runner)
+
+    # this is the op that we pass to our model
+    inputs = image_queue.dequeue_many(batch_size)
+    print inputs
+    
+    return inputs
 
 
 ########
@@ -70,10 +82,30 @@ num_epochs = 20
 # BUILDING THE MODEL
 ###############################
 
+female_data_dir = '/home/wseto/datasets/celeba_female'
+male_data_dir = '/home/wseto/datasets/celeba_male'
 
-real_ims = tf.placeholder(tf.float32, [None, image_h, image_w, 3], name='real_ims')
+female_data = glob(os.path.join(female_data_dir, "*.png"))
+male_data = glob(os.path.join(male_data_dir, "*.png"))
 
-inputs = tf.placeholder(tf.float32, [None, image_h, image_w, 3], name='inputs')
+data_disc, female_data_nondisc = train_test_split(female_data, test_size=0.5, random_state=42)
+
+female_data_train, female_data_sample = train_test_split(female_data_nondisc, test_size=0.1, random_state=42)
+male_data_train, male_data_sample = train_test_split(male_data, test_size=0.1, random_state=42)
+
+data_train = female_data_train + male_data_train
+data_sample = female_data_sample + male_data_sample
+
+
+print "data train:", len(data_train)
+print "data disc:", len(data_disc)
+print "data sample:", len(data_sample)
+
+
+real_ims = input_pipeline(data_disc, batch_size, num_epochs)
+inputs = input_pipeline(data_train, batch_size, num_epochs)
+sample_inputs = input_pipeline(data_sample, batch_size, num_epochs)
+
 
 
 # generator section
@@ -88,7 +120,7 @@ def create_generator(inputs, b_training=True):
                         weights_initializer=tf.truncated_normal_initializer(stddev=0.02),
                         weights_regularizer=slim.l2_regularizer(0.0005)):
         with slim.arg_scope([slim.batch_norm],
-                    is_training=b_training, scale=True, decay=0.9):
+                    is_training=b_training, scale=True, decay=0.9, epsilon=1e-5):
             net = inputs
             print_shape(net)
 
@@ -133,12 +165,14 @@ def create_generator(inputs, b_training=True):
 with tf.variable_scope("generator") as scope:
     gen = create_generator(inputs)
     scope.reuse_variables()
-    gen_test = create_generator(inputs, False)
+    gen_test = create_generator(sample_inputs, False)
 
 
 # create cycle generator
 with tf.variable_scope("cycle_generator") as scope:
     gen_cycle = create_generator(gen)
+    scope.reuse_variables()
+    gen_cycle_test = create_generator(gen_test, False)
 
 
 
@@ -164,7 +198,7 @@ def create_discriminator(inputs, counter, b_reuse=False):
         disc = lrelu(slim.conv2d(noisy_inputs, 64, [5, 5], scope='conv1'))
         print_shape(disc)
 
-        with slim.arg_scope([slim.batch_norm], scale=True, decay=0.9):
+        with slim.arg_scope([slim.batch_norm], scale=True, decay=0.9, epsilon=1e-5):
             disc = lrelu(slim.batch_norm(slim.conv2d(disc, 128, [5, 5], scope='conv2'), scope='d_bn1'))
             print_shape(disc)
 
@@ -195,8 +229,8 @@ with tf.variable_scope("discriminators") as scope:
 
 # make labels noisy for discriminator
 rand_val = tf.random_uniform([], seed=42)
-labels_real = tf.cond(rand_val < 1, lambda: tf.ones_like(disc_real), lambda: tf.zeros_like(disc_real))
-labels_fake = tf.cond(rand_val < 1, lambda: tf.zeros_like(disc_fake), lambda: tf.ones_like(disc_fake))
+labels_real = tf.cond(rand_val < 0.95, lambda: tf.ones_like(disc_real), lambda: tf.zeros_like(disc_real))
+labels_fake = tf.cond(rand_val < 0.95, lambda: tf.zeros_like(disc_fake), lambda: tf.ones_like(disc_fake))
 
 d_loss_real = tf.reduce_mean( \
     tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_real, labels=labels_real))
@@ -208,7 +242,6 @@ d_loss_fake = tf.reduce_mean( \
 # similar to above, but we want fake (generator) images to output 1
 g_loss_adv = tf.reduce_mean( \
     tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_fake, labels=tf.ones_like(disc_fake)))
-
 
 
 # reconstruction loss is on input and cycle output
@@ -230,35 +263,10 @@ optim = tf.train.AdamOptimizer(adam_learning_rate, beta1=adam_beta1)
 d_train_op = slim.learning.create_train_op(d_loss, optim, variables_to_train=d_vars)
 g_train_op = slim.learning.create_train_op(g_loss, optim, variables_to_train=g_vars)
 
-    
 weight_saver = tf.train.Saver(max_to_keep=1)
 
 
 print "initialization done"
-
-
-#############
-# TRAINING
-############
-
-female_data_dir = '/home/wseto/datasets/celeba_female'
-male_data_dir = '/home/wseto/datasets/celeba_male'
-
-female_data = glob(os.path.join(female_data_dir, "*.png"))
-male_data = glob(os.path.join(male_data_dir, "*.png"))
-
-data_disc, female_data_nondisc = train_test_split(female_data, test_size=0.5, random_state=42)
-
-female_data_train, female_data_sample = train_test_split(female_data_nondisc, test_size=0.1, random_state=42)
-male_data_train, male_data_sample = train_test_split(male_data, test_size=0.1, random_state=42)
-
-data_train = female_data_train + male_data_train
-data_sample = female_data_sample + male_data_sample
-
-
-print "data train:", len(data_train)
-print "data disc:", len(data_disc)
-print "data sample:", len(data_sample)
 
 
 # create directories to save checkpoint and samples
@@ -277,75 +285,72 @@ print "-----------"
 start_time = time.time()
 counter = 0
 
-b_load = False
-#ckpt_dir = '/home/wseto/dcgan/checkpoint_up_rand'
+# Create the graph, etc.
+init_op = [tf.local_variables_initializer(),
+           tf.global_variables_initializer()]
 
-with tf.Session() as sess:
-    tf.global_variables_initializer().run()
+# Create a session for running operations in the Graph.
+config = tf.ConfigProto()
+#config.operation_timeout_in_ms=20000  # for debugging queue hangs
+sess = tf.Session(config=config)
 
-    num_batches = len(data_train) // batch_size
+# Initialize the variables (like the epoch counter).
+sess.run(init_op)
 
-    if b_load:
-        ckpt = tf.train.get_checkpoint_state(ckpt_dir)
-        weight_saver.restore(sess, ckpt.model_checkpoint_path)
-        counter = int(ckpt.model_checkpoint_path.split('-', 1)[1]) 
-        print "successfully restored!" + " counter:", counter
-        
-    for epoch in range(num_epochs):
+# Start input enqueue threads.
+coord = tf.train.Coordinator()
+threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 
-        np.random.shuffle(data_train)
+print "queue runners done"
+num_batches = len(data_train) // batch_size
 
-        total_errD = 2
+b_load = True
+ckpt_dir = '/home/wseto/dcgan/checkpoint_female_cycle'
+if b_load:
+    ckpt = tf.train.get_checkpoint_state(ckpt_dir)
+    weight_saver.restore(sess, ckpt.model_checkpoint_path)
+    counter = int(ckpt.model_checkpoint_path.split('-', 1)[1]) 
+    print "successfully restored!" + " counter:", counter
 
-        for idx in xrange(num_batches):
-            batch_filenames = data_train[idx*batch_size : (idx+1)*batch_size]
+try:
+    while not coord.should_stop():
+
+        fetches = [d_loss_fake, d_loss_real, g_loss_adv, d_train_op, g_train_op]
+        errD_fake, errD_real, errG, _, _ = sess.run(fetches)
+
+        total_errD = errD_fake + errD_real
+        counter += 1
+
+        idx = np.mod(counter, num_batches)
+        epoch = counter / num_batches
+        print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss_fake: %.3f, d_loss_real: %.3f, g_loss: %.8f" \
+            % (epoch, idx, num_batches,
+                time.time() - start_time, errD_fake, errD_real, errG))
+
+        if np.mod(counter, 30) == 1:
+
+            sample, sample_origs, sample_cycle = sess.run([gen_test, sample_inputs, gen_cycle_test])
             
-            batch_origs, _ = get_images(batch_filenames)
-            
-            # discriminator batch is different since we are doing unpaired experiment
-            rand_idx = np.random.randint(len(data_disc)-batch_size-1)
-            disc_batch_files = data_disc[rand_idx: rand_idx+batch_size]     
-            disc_batch_orig, _ = get_images(disc_batch_files)
+            # save an image, with the original next to the generated one
+            merge_im = np.zeros( (image_h, image_h*3, 3) )
+            merge_im[:, :image_h, :] = (sample_origs[0]+1)*127.5
+            merge_im[:, image_h:image_h*2, :] = (sample[0]+1)*127.5
+            merge_im[:, image_h*2:, :] = (sample_cycle[0]+1)*127.5
 
-            fetches = [d_loss_fake, d_loss_real, g_loss_adv, d_train_op, g_train_op]
-            errD_fake, errD_real, errG, _, _ = sess.run(fetches, feed_dict={ inputs: batch_origs, real_ims: disc_batch_orig})
+            imsave(samples_dir + '/test_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
+            print "saving a sample"
 
-            # if total_errD > 1:
-            #     fetches = [d_loss_fake, d_loss_real, g_loss_adv, d_optim, g_optim]
-            #     errD_fake, errD_real, errG, _, _ = sess.run(fetches, feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
-            # else:
-            #     fetches = [d_loss_fake, d_loss_real, g_loss_adv, g_optim]
-            #     errD_fake, errD_real, errG, _ = sess.run(fetches, feed_dict={ inputs: batch_inputs, real_ims: disc_batch_orig})
-
-            total_errD = errD_fake + errD_real
+        if np.mod(counter, 1000) == 2:
+            weight_saver.save(sess, checkpoint_dir + '/model', counter)
+            print "saving a checkpoint"
 
 
+except tf.errors.OutOfRangeError:
+    print('Done training -- epoch limit reached')
+finally:
+    # When done, ask the threads to stop.
+    coord.request_stop()
 
-            counter += 1
-            print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss_fake: %.3f, d_loss_real: %.3f, g_loss: %.8f" \
-                % (epoch, idx, num_batches,
-                    time.time() - start_time, errD_fake, errD_real, errG))
-
-
-            if np.mod(counter, 30) == 1:
-
-
-                rand_idx = np.random.randint(len(data_sample)-batch_size+1)
-                sample_origs, _ = get_images(data_sample[rand_idx: rand_idx+batch_size])
-
-                sample = sess.run([gen_test], feed_dict={inputs: sample_origs})
-
-                sample_cycle = sess.run([gen_cycle], feed_dict={inputs: sample_origs})
-                
-                # save an image, with the original next to the generated one
-                merge_im = np.zeros( (image_h, image_h*3, 3) )
-                merge_im[:, :image_h, :] = (sample_origs[0]+1)*127.5
-                merge_im[:, image_h:image_h*2, :] = (sample[0][0]+1)*127.5
-                merge_im[:, image_h*2:, :] = (sample_cycle[0][0]+1)*127.5
-
-                imsave(samples_dir + '/test_{:02d}_{:04d}.png'.format(epoch, idx), merge_im)
-                print "saving a sample"
-
-            if np.mod(counter, 1000) == 2:
-                weight_saver.save(sess, checkpoint_dir + '/model', counter)
-                print "saving a checkpoint"
+# Wait for threads to finish.
+coord.join(threads)
+sess.close()
